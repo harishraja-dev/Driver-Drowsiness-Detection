@@ -1,0 +1,190 @@
+!pip install mediapipe
+import cv2
+import numpy as np
+import mediapipe as mp
+from mediapipe.tasks.python import vision
+from mediapipe.tasks import python
+from IPython.display import HTML
+from base64 import b64encode
+import os
+
+# ==============================
+# LOAD MODEL
+# ==============================
+base_options = python.BaseOptions(
+    model_asset_path="/content/drive/MyDrive/DL/face_landmarker.task"
+)
+
+options = vision.FaceLandmarkerOptions(
+    base_options=base_options,
+    num_faces=1
+)
+
+detector = vision.FaceLandmarker.create_from_options(options)
+
+# ==============================
+# LANDMARK INDICES
+# ==============================
+LEFT_EYE = [33, 160, 158, 133, 153, 144]
+RIGHT_EYE = [362, 385, 387, 263, 373, 380]
+MOUTH = [13, 14, 78, 308]
+
+# ==============================
+# FUNCTIONS
+# ==============================
+def distance(p1, p2):
+    return np.linalg.norm(np.array(p1) - np.array(p2))
+
+def compute_ECR(eye):
+    return (distance(eye[1], eye[5]) + distance(eye[2], eye[4])) / (2.0 * distance(eye[0], eye[3]))
+
+def compute_MAR(mouth):
+    return distance(mouth[0], mouth[1]) / distance(mouth[2], mouth[3])
+
+# ==============================
+# VIDEO INPUT
+# ==============================
+video_path = path_talking_female
+cap = cv2.VideoCapture(video_path)
+
+if not cap.isOpened():
+    raise ValueError("Video not opened. Check path.")
+
+fps = cap.get(cv2.CAP_PROP_FPS)
+if fps == 0 or fps is None:
+    print("FPS was 0 → using default 25")
+    fps = 25
+
+print("FPS:", fps)
+
+# ==============================
+# PARAMETERS
+# ==============================
+THRESHOLD = 0.15
+DROWSY_THRESHOLD = int(1.5 * fps)
+YAWN_THRESHOLD = int(2 * fps)
+
+closed_frames = 0
+yawn_frames = 0
+isOut = False
+frames = []
+
+# ==============================
+# PROCESS VIDEO
+# ==============================
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    h, w, _ = frame.shape
+
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+    result = detector.detect(mp_image)
+
+    status_text = "NOT DROWSY"
+
+    if result.face_landmarks:
+        face_landmarks = result.face_landmarks[0]
+
+        left_eye, right_eye, mouth = [], [], []
+
+        for idx in LEFT_EYE:
+            lm = face_landmarks[idx]
+            left_eye.append([int(lm.x * w), int(lm.y * h)])
+
+        for idx in RIGHT_EYE:
+            lm = face_landmarks[idx]
+            right_eye.append([int(lm.x * w), int(lm.y * h)])
+
+        for idx in MOUTH:
+            lm = face_landmarks[idx]
+            mouth.append([int(lm.x * w), int(lm.y * h)])
+
+        if len(left_eye) == 6 and len(right_eye) == 6 and len(mouth) == 4:
+
+            final_ecr = (compute_ECR(left_eye) + compute_ECR(right_eye)) / 2.0
+            mar = compute_MAR(mouth)
+
+            # Eye logic
+            if final_ecr < THRESHOLD:
+                closed_frames += 1
+            else:
+                closed_frames = 0
+
+            # Yawn logic
+            if mar > 0.6:
+                yawn_frames += 1
+            else:
+                yawn_frames = 0
+
+            # Final decision
+            if closed_frames >= DROWSY_THRESHOLD or yawn_frames >= YAWN_THRESHOLD:
+                status_text = "DROWSY"
+                isOut = True
+
+            # Metrics
+            cv2.putText(frame, f"ECR: {final_ecr:.2f}", (30, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+
+            cv2.putText(frame, f"MAR: {mar:.2f}", (30, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+
+            cv2.putText(frame, f"Closed: {closed_frames}", (30, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+
+            cv2.putText(frame, f"Yawn: {yawn_frames}", (30, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+
+    # Status text
+    color = (0,0,255) if status_text == "DROWSY" else (0,255,0)
+    cv2.putText(frame, status_text, (30, 170),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, color, 3)
+
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    frames.append(frame_rgb)
+
+    if isOut:
+        print("DROWSY DETECTED")
+        for _ in range(int(fps * 2)):
+            frames.append(frame_rgb)
+        break
+
+cap.release()
+
+print("Frames collected:", len(frames))
+
+# ==============================
+# WRITE VIDEO (OPENCV)
+# ==============================
+h, w, _ = frames[0].shape
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out = cv2.VideoWriter('output.mp4', fourcc, fps, (w, h))
+
+for f in frames:
+    out.write(cv2.cvtColor(f, cv2.COLOR_RGB2BGR))
+
+out.release()
+
+print("Raw video saved")
+
+# ==============================
+# FIX VIDEO FOR BROWSER (CRITICAL)
+# ==============================
+os.system("ffmpeg -y -i output.mp4 -vcodec libx264 -acodec aac output_fixed.mp4")
+
+print("Video re-encoded for HTML5")
+
+# ==============================
+# DISPLAY VIDEO
+# ==============================
+mp4 = open('output_fixed.mp4','rb').read()
+data_url = "data:video/mp4;base64," + b64encode(mp4).decode()
+
+HTML(f"""
+<video width=600 controls autoplay>
+  <source src="{data_url}" type="video/mp4">
+</video>
+""")
